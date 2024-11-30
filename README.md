@@ -23,3 +23,7 @@ Identifica 5 poses de yoga diferentes usando machine learning y procesamiento de
 ./data/TEST <= ruta de la carpeta con las imagenes de prueba
 
 ./data/TRAIN <= ruta de la carpeta con las imagenes de entrenamiento
+
+
+##### utils.py contiene el código para descargar las imagénes desde google drive automáticamente
+
