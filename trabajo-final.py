@@ -10,6 +10,12 @@ from sklearn.metrics import accuracy_score
 import numpy as np
 from skimage import morphology, io
 from scipy.ndimage import convolve
+from sklearn.metrics import accuracy_score, cohen_kappa_score, confusion_matrix
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense
+from sklearn.preprocessing import LabelEncoder
+import seaborn as sns
 
 
 def erosionar(image):
@@ -32,36 +38,46 @@ def dilatar(image):
     return imgD
 
 
-import numpy as np
-from scipy.ndimage import convolve
-
-
 def count_skeleton_endpoints(skeleton):
     """
-    Detecta y cuenta los endpoints (puntos finales) en un esqueleto binario.
-    :param skeleton: Imagen binaria del esqueleto (valores 0 y 1).
-    :return: Número de endpoints y mapa binario de endpoints.
+    Cuenta las esquinas en la imagen del esqueleto utilizando Harris Corner Detection.
+
+    Args:
+        skeleton (numpy.ndarray): Imagen del esqueleto con valores binarios (0 y 1).
+
+    Returns:
+        int: Número de esquinas detectadas.
     """
-    # Validar que el esqueleto esté en binario
-    if not np.array_equal(np.unique(skeleton), [0, 1]):
-        raise ValueError("El esqueleto debe estar en binario (valores 0 y 1).")
 
-    # Kernel para contar vecinos en un vecindario 3x3
-    kernel = np.array([[1, 1, 1], [1, 0, 1], [1, 1, 1]])
+    # Verifica si la imagen está en RGB y conviértela a escala de grises
+    if len(skeleton.shape) == 3 and skeleton.shape[2] == 3:
+        gray = cv2.cvtColor(skeleton, cv2.COLOR_RGB2GRAY)
+    else:
 
-    # Contar vecinos de cada píxel
-    neighbor_count = convolve(skeleton, kernel, mode="constant", cval=0)
+        gray = skeleton
 
-    # Identificar endpoints: píxeles con valor 1 y exactamente 1 vecino
-    endpoints = (skeleton == 1) & (neighbor_count == 1)
+    # Reduce ruido con un suavizado leve
+    # gray = cv2.GaussianBlur(gray, (3, 3), 0)
 
-    # Filtrar puntos espurios
-    endpoints = remove_spurious_endpoints(skeleton, endpoints)
+    # Asegúrate de convertir la imagen a un formato adecuado para Harris (grayscale con valores 0-255)
+    gray = (gray * 255).astype(np.uint8)
 
-    # Contar los endpoints
-    num_endpoints = np.sum(endpoints)
-    print("nunmajjsjdsan", num_endpoints)
-    return num_endpoints, endpoints
+    # Aplica cornerHarris
+    blockSize = 2  # Tamaño del vecindario considerado para la detección
+    ksize = 3  # Apertura del kernel de Sobel usado
+    k = 0.04  # Parámetro libre en la ecuación de Harris
+    dst = cv2.cornerHarris(gray, blockSize, ksize, k)
+
+    # Normalizar la respuesta para obtener una mejor visualización
+    dst = cv2.dilate(dst, None)  # Dilatar para marcar las esquinas
+    corners_detected = (
+        dst > 0.01 * dst.max()
+    )  # Umbral para considerar un punto como esquina
+
+    # Contar esquinas detectadas
+    num_corners = np.sum(corners_detected)
+
+    return num_corners
 
 
 def remove_spurious_endpoints(skeleton, endpoints):
@@ -86,9 +102,12 @@ def remove_spurious_endpoints(skeleton, endpoints):
 
 
 def getSkeleton(image):
-    print("image shape", image.shape)
+
     # Convert the image to grayscale
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+    # gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+    gray = image
 
     # Apply a threshold to get a binary image (First check background color)
     if gray[0, 0] == 0:
@@ -113,34 +132,28 @@ def getSkeleton(image):
         binary
     )  ##La función recibe imagenes con valores de 0 y 1, por tanto debemos proceder a reemplazar 255 por 1
     skeletonn = morphology.skeletonize(newImage)
-
     return skeletonn
 
 
 def processImage(image):
-    print("STARTING")
+
     # if len(image.shape) == 3:  # Si tiene tres canales (imagen en color)
     #     image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
     erosion = erosionar(image)
 
-    plt.imshow(erosion)
-    plt.show()
+    # plt.imshow(erosion)
+    # plt.show()
 
     dilatacion = dilatar(erosion)
-    print("STARTING 3")
 
-    plt.imshow(dilatacion)
-    plt.show()
+    # plt.imshow(dilatacion)
+    # plt.show()
 
     esqueleto = getSkeleton(dilatacion)
-    print("STARTING 4")
-
     esquinas = count_skeleton_endpoints(esqueleto)
 
-    print("esquinas", esquinas)
-
-    return esqueleto
+    return esqueleto, esquinas
 
 
 # Extraer características y etiquetas de imágenes
@@ -153,15 +166,12 @@ def extract_features(image):
 
     vertical_profile = np.sum(resized_img, axis=1)
     horizontal_profile = np.sum(resized_img, axis=0)
-    # height, width = gray.shape
-    # aspect_ratio = width / height
 
-    aspect_ratio = 1.0  # Aspect ratio is always 1.0 for 64x64 images
+    esqueleto, esquinas = processImage(resized_img)
 
-    # features = np.concatenate(
-    #     [flattened_img, [aspect_ratio], vertical_profile, horizontal_profile]
-    # )
     features = np.concatenate([flattened_img, vertical_profile, horizontal_profile])
+    # features  = np.append(features, esquinas)
+    # features = np.concatenate([flattened_img, vertical_profile, horizontal_profile])
 
     return features
 
@@ -187,8 +197,6 @@ def crop_white_background(image):
     if not contours:
         print("No object detected")
         return image
-
-    # print("Number of contours: ", len(contours))
 
     # ***************** This method works ok but can lead to errors
     # If the clothes are light so the person will end up being cropped too in different contours in some cases
@@ -261,6 +269,23 @@ def load_images_and_labels(folder_path):
     return images, labels
 
 
+def build_ann_model(input_dim):
+    model = Sequential()
+    # Capa de entrada
+    model.add(Dense(128, input_dim=input_dim, activation="relu"))  # Primera capa
+    model.add(Dense(64, input_dim=input_dim, activation="relu"))  # segunda capa
+    model.add(Dense(32, input_dim=input_dim, activation="relu"))  # tercera capa
+
+    # Capa de salida
+    model.add(
+        Dense(len(set(y_train)), activation="softmax")
+    )  # Número de clases en y_train
+    model.compile(
+        optimizer="adam", loss="sparse_categorical_crossentropy", metrics=["accuracy"]
+    )
+    return model
+
+
 # create a machine learning model to classify and identify the yoga poses
 # Cargar y preparar los datos de entrenamiento y prueba
 print("STFJADHAS")
@@ -273,22 +298,22 @@ print("STFJADHAS")
 # ╚██████╔╝███████╗░░░██║░░░░░░██║░░░██║██║░╚███║╚██████╔╝  ██║██║░╚═╝░██║██║░░██║╚██████╔╝███████╗██████╔╝
 # ░╚═════╝░╚══════╝░░░╚═╝░░░░░░╚═╝░░░╚═╝╚═╝░░╚══╝░╚═════╝░  ╚═╝╚═╝░░░░░╚═╝╚═╝░░╚═╝░╚═════╝░╚══════╝╚═════╝░"""
 # )
+label_encoder = LabelEncoder()
+
 train_images, train_labels = load_images_and_labels("./data/TRAIN/")
+train_labels = label_encoder.fit_transform(train_labels)
 test_images, test_labels = load_images_and_labels("./data/TEST/")
-labels = list(set(train_labels + test_labels))
+test_labels = label_encoder.fit_transform(test_labels)
+labels = list(set(train_labels).union(set(test_labels)))
+
+# Codificador para las etiquetas, ya que tensorflow no acepta text
+
+print("labels", labels)
 X_train, y_train = [], []
 X_test, y_test = [], []
 
 print("Training images: ", len(train_images))
 print("Test images: ", len(test_images))
-
-# Prueba del esqueleto conn una sola imagen
-# prueba = train_images[0]
-# esqueletoo = processImage(prueba)
-# plt.imshow(esqueletoo)
-# plt.show()
-# cv2.imshow(esqueletoo)
-
 
 for image in train_images:
     features = extract_features(image)
@@ -305,7 +330,7 @@ X_test, y_test = np.array(X_test), np.array(test_labels)
 pca = PCA(n_components=0.95)  # Retiene el 95% de la varianza
 X_train_pca = pca.fit_transform(X_train)
 X_test_pca = pca.transform(X_test)
-# -------------------------------------
+# ------------------------------------- RF
 # Entrenar el modelo con las características reducidas
 clf = RandomForestClassifier(n_estimators=100, random_state=42)
 # clf.fit(X_train_pca, y_train)
@@ -313,14 +338,81 @@ clf.fit(X_train, y_train)
 
 # Evaluar el modelo
 # y_pred = clf.predict(X_test_pca)
-y_pred = clf.predict(X_test)
-accuracy = accuracy_score(y_test, y_pred)
+y_pred_rf = clf.predict(X_test)
+accuracy = accuracy_score(y_test, y_pred_rf)
 print(f"Accuracy: {accuracy:.2f}")
 
-# # Test the model with a new image
-# new_image = cv2.imread("./oo.jpg")
-# new_features = extract_features(new_image)
-# # new_features_pca = pca.transform([new_features])
-# # new_pose = clf.predict(new_features_pca)
-# new_pose = clf.predict([new_features])
-# print(f"New pose: {new_pose[0]}")
+# -------------------------------------- ANN
+input_dim = X_train_pca.shape[1]  # Dimensión de entrada tras PCA
+ann_model = build_ann_model(input_dim)
+accs = []
+ann_y_preds = []
+for i in range(50):
+    history = ann_model.fit(
+        X_train_pca,
+        y_train,
+        epochs=100,
+        batch_size=16,
+        verbose=0,
+        validation_data=(X_test_pca, y_test),
+    )
+    y_pred_ann = np.argmax(ann_model.predict(X_test_pca), axis=1)
+    acc = accuracy_score(y_test, y_pred_ann)
+    accs.append(acc)
+    ann_y_preds.append(y_pred_ann)
+
+
+y_pred_ann = ann_y_preds[accs.index(max(accs))]
+
+
+# -------------------- Comparación de Resultados --------------------
+# 1. Accuracy
+accuracy_rf = accuracy_score(y_test, y_pred_rf)
+accuracy_ann = max(accs)
+
+# 2. Kappa
+kappa_rf = cohen_kappa_score(y_test, y_pred_rf)
+kappa_ann = cohen_kappa_score(y_test, y_pred_ann)
+
+# 3. Matriz de Confusión
+conf_matrix_rf = confusion_matrix(y_test, y_pred_rf)
+conf_matrix_ann = confusion_matrix(y_test, y_pred_ann)
+
+# ------------------------ Resultados -------------------------
+print("Resultados del Random Forest:")
+print(f"Accuracy: {accuracy_rf:.2f}")
+print(f"Kappa: {kappa_rf:.2f}")
+print("Matriz de Confusión:")
+print(conf_matrix_rf)
+plt.figure(figsize=(8, 6))
+sns.heatmap(
+    conf_matrix_rf,
+    annot=True,
+    fmt="d",
+    cmap="Blues",
+    xticklabels=labels,
+    yticklabels=labels,
+)
+plt.title(f"Matriz de Confusión - RF")
+plt.xlabel("Predicción")
+plt.ylabel("Etiqueta Verdadera")
+plt.show()
+
+print("\nResultados del ANN:")
+print(f"Accuracy: {accuracy_ann:.2f}")
+print(f"Kappa: {kappa_ann:.2f}")
+print("Matriz de Confusión:")
+print(conf_matrix_ann)
+plt.figure(figsize=(8, 6))
+sns.heatmap(
+    conf_matrix_ann,
+    annot=True,
+    fmt="d",
+    cmap="Blues",
+    xticklabels=labels,
+    yticklabels=labels,
+)
+plt.title(f"Matriz de Confusión - AN")
+plt.xlabel("Predicción")
+plt.ylabel("Etiqueta Verdadera")
+plt.show()
